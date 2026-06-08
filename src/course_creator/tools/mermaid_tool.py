@@ -1,3 +1,4 @@
+# Резаева Оля
 from typing import Type, Optional
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field, PrivateAttr

@@ -1,3 +1,4 @@
+# Андреев Дима
 import os  # <-- ЭТА СТРОКА ОБЯЗАТЕЛЬНА
 from dotenv import load_dotenv
 from crewai import Agent, Crew, Process, Task, LLM
