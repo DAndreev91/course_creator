@@ -34,7 +34,7 @@ class CourseCreator():
             model="deepseek/deepseek-chat",
             base_url="https://api.deepseek.com/v1",
             api_key=os.getenv("DEEPSEEK_API_KEY"),
-            temperature=0.4
+            temperature=0.3
         )
         
         self.search_tool = SerperDevTool()

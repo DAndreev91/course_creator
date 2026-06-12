@@ -620,6 +620,514 @@ sequenceDiagram
     deactivate APIGateway
 ```
 
+#### Sequence diagram: Асинхронный сценарий
+
+```mermaid
+sequenceDiagram
+    participant Client as Клиент
+    participant ServiceA as Сервис A
+    participant Kafka as Kafka Topic
+    participant ServiceB as Сервис B
+    participant DLT as Dead Letter Topic
+    participant Notify as Сервис уведомлений
+
+    Note over Client,Notify: Шаг 1 — Сервис A принимает команду и сразу отвечает
+
+    Client->>ServiceA: POST /orders (Создать заказ)
+    activate ServiceA
+    ServiceA->>ServiceA: Валидация + сохранение в БД (статус PENDING)
+    ServiceA-->>Client: 202 Accepted (Location: /orders/123/status)
+    deactivate ServiceA
+
+    Note over Client,Notify: Шаг 2 — Сервис A публикует событие
+
+    ServiceA->>Kafka: Событие OrderCreated {orderId: 123, ...}
+    activate Kafka
+    Kafka-->>ServiceA: Ack (offset 567)
+    deactivate Kafka
+
+    Note over Client,Notify: Шаг 3 — Сервис B обрабатывает асинхронно
+
+    Kafka->>ServiceB: Подписка на OrderCreated
+    activate ServiceB
+    ServiceB->>ServiceB: Резервирование товара на складе
+
+    alt Резерв успешен
+        ServiceB->>Kafka: Событие InventoryReserved {orderId: 123}
+        ServiceB->>ServiceB: Обновить статус
+    else Ошибка (нет товара)
+        ServiceB->>ServiceB: Retry #1 (backoff 1с)
+        ServiceB->>ServiceB: Retry #2 (backoff 2с)
+        ServiceB->>ServiceB: Retry #3 (backoff 4с)
+
+        alt После 3-х попыток — ошибка
+            ServiceB->>DLT: FailedInventoryReservation {orderId, reason}
+            Note over DLT: Мёртвый ящик для ручного разбора
+        end
+    end
+    deactivate ServiceB
+
+    Note over Client,Notify: Шаг 4 — Уведомление клиента (опционально)
+
+    Kafka->>Notify: Подписка на InventoryReserved
+    activate Notify
+    Notify->>Client: Email/Push "Заказ #123 подтверждён"
+    deactivate Notify
+```
+
+#### Сравнительная таблица — когда что выбирать
+
+| Критерий | Синхронный (Request-Response) | Асинхронный (Event-Driven) |
+|----------|------------------------------|---------------------------|
+| **Latency** | Высокая. Сумма всех вызовов | Низкая. Клиент сразу получает 202 |
+| **Связанность** | Жёсткая. Gateway знает все сервисы | Слабая. Сервисы знают только события |
+| **Отказоустойчивость** | Отказ одного = отказ всей цепочки | Изолированная. Остальные работают |
+| **Повторные попытки** | Ручные, на каждом уровне | Встроенные в брокер (retry + backoff) |
+| **Трассировка** | Сложно. Нужна распределённая трассировка | Удобно. Каждое событие — шаг, видно offset и lag |
+| **Масштабирование** | Вертикальное + балансировка | Горизонтальное, через consumer groups |
+| **Консистентность** | Сильная (в пределах транзакции) | Eventual (согласованность со временем) |
+| **Транзакции** | ACID / 2PC (блокирующие) | SAGA с компенсациями (неблокирующие) |
+| **Сложность отладки** | Низкая — стек вызовов перед глазами | Выше — нужно собирать трейс по correlationId |
+| **Подходит для** | Запросы в реальном времени (авторизация, оплата) | Долгие бизнес-процессы (заказ, доставка, onboarding) |
+
+---
+
+#### Комбинированный подход — что применяют на практике
+
+Чистый синхронный или чистый асинхронный стиль встречается редко.
+В реальных системах почти всегда используют **гибрид**:
+
+| Сценарий | Тип взаимодействия | Почему |
+|----------|-------------------|--------|
+| `POST /orders` (создать заказ) | **Синхронный** → `202 Accepted` | Клиент должен сразу узнать, принят ли заказ. Дальше — асинхронная кухня |
+| `GET /orders/123` (статус заказа) | **Синхронный**, чтение своей БД | Чтение своей проекции — быстро и консистентно |
+| `GET /products` (каталог товаров) | **Синхронный**, чтение своей БД | Поиск и фильтры требуют мгновенного ответа |
+| Заказ → Резерв склада → Оплата → Доставка | **Асинхронный**. SAGA через события | Процесс длится минуты/часы, много точек отказа |
+| Отправка email клиенту | **Асинхронный**. Fire-and-forget | Письмо не влияет на бизнес-транзакцию |
+| Списание денег (payment) | **Синхронный** (иногда 2PC/XA) | Деньги любят строгую консистентность |
+| Скоринг кредита (занимает 30 сек) | **Асинхронный** с callback | Клиент не должен висеть 30 секунд на одном соединении |
+| Генерация отчёта (занимает 2 мин) | **Асинхронный** с polling | Nginx отрубит синхронный вызов по таймауту через 60 сек |
+| Авторизация пользователя | **Синхронный** | Ответ нужен немедленно, иначе не пускаем дальше |
+| Онбординг сотрудника (HR → IT → Бухгалтерия) | **Асинхронный**. SAGA | Процесс идёт часами/днями, шаги независимы |
+
+---
+
+> 💡 **[ДОПОЛНЕНИЕ SA]** **Совет системного аналитика:** На диаграмме выше показан классический каскадный отказ. В реальной спецификации ТЗ обязательно фиксируйте **timeout-ы для каждого звена** и политику retry (количество попыток, интервал, exponential backoff). Без этого разработчики ставят дефолтные 30 секунд — и вся цепочка подвисает. **[КОНЕЦ ДОПОЛНЕНИЯ SA]**
+
+---
+
+**[ДОПОЛНЕНИЕ SA: Блок 1 — Проектирование контрактов API]**
+
+### 1.1. Проектирование контрактов: OpenAPI и AsyncAPI
+
+В реальной работе системный аналитик пишет или ревьюит спецификации API. Ниже — примеры, которые вы встретите в продакшене.
+
+#### 1.1.1. OpenAPI 3.0 — синхронный REST-эндпоинт
+
+```yaml
+openapi: "3.0.3"
+info:
+  title: Order Service API
+  version: "1.0.0"
+  description: |
+    API для создания и управления заказами интернет-магазина.
+    Все эндпоинты требуют JWT-аутентификации в заголовке Authorization.
+
+paths:
+  /api/v1/orders:
+    post:
+      summary: Создать новый заказ
+      operationId: createOrder
+      tags:
+        - Orders
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+      responses:
+        '201':
+          description: Заказ успешно создан
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+        '400':
+          description: Ошибка валидации (некорректные данные)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Бизнес-ошибка (товара нет на складе)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Превышен лимит запросов (rate limit)
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                description: Секунд до следующего допустимого запроса
+
+components:
+  schemas:
+    CreateOrderRequest:
+      type: object
+      required:
+        - customerId
+        - items
+        - deliveryAddress
+      properties:
+        customerId:
+          type: string
+          format: uuid
+          description: Идентификатор клиента
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        items:
+          type: array
+          minItems: 1
+          maxItems: 50
+          description: Позиции заказа
+          items:
+            $ref: '#/components/schemas/OrderItem'
+        deliveryAddress:
+          $ref: '#/components/schemas/Address'
+        promoCode:
+          type: string
+          maxLength: 20
+          description: Промокод (опционально)
+          example: "WELCOME2024"
+
+    OrderItem:
+      type: object
+      required:
+        - productId
+        - quantity
+      properties:
+        productId:
+          type: string
+          format: uuid
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 999
+        price:
+          type: number
+          format: decimal
+          description: Цена за единицу на момент добавления
+          example: 1499.99
+
+    Address:
+      type: object
+      required:
+        - country
+        - city
+        - street
+        - building
+      properties:
+        country:
+          type: string
+          example: "Россия"
+        city:
+          type: string
+          example: "Москва"
+        street:
+          type: string
+          example: "Тверская"
+        building:
+          type: string
+          example: "12"
+        apartment:
+          type: string
+          example: "45"
+        zipCode:
+          type: string
+          pattern: '^\d{6}$'
+          example: "125009"
+
+    OrderResponse:
+      type: object
+      properties:
+        orderId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [CREATED, CONFIRMED, PAID, SHIPPED, DELIVERED, CANCELLED]
+        totalAmount:
+          type: number
+          format: decimal
+        createdAt:
+          type: string
+          format: date-time
+
+    ErrorResponse:
+      type: object
+      properties:
+        code:
+          type: string
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          example: "Поле 'quantity' должно быть от 1 до 999"
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              reason:
+                type: string
+```
+
+> ⚠️ **Замечание системного аналитика:** Самая частая ошибка новичков — не указывать `required` поля в схеме. Разработчик на фронтенде не поймёт, какие поля обязательны, и начнёт гадать. Второй камень — забыть про `maxLength` / `pattern` для строк. Без них в БД прилетит 100500-символьная строка и упадёт индекс. **Всегда валидируйте на уровне контракта то, что валидируется на уровне БД.**
+
+---
+
+#### 1.1.2. AsyncAPI — событийная интеграция через Kafka
+
+```yaml
+asyncapi: "2.6.0"
+info:
+  title: Order Events
+  version: "1.0.0"
+  description: |
+    Событийная шина для обмена сообщениями между сервисами
+    в процессе оформления заказа. Гарантия доставки: at-least-once.
+
+channels:
+  order.events:
+    description: |
+      Канал для событий жизненного цикла заказа.
+      Ключ сообщения — orderId (UUID).
+    publish:
+      summary: Сервисы публикуют события заказа
+      operationId: publishOrderEvent
+      message:
+        oneOf:
+          - $ref: '#/components/messages/OrderCreated'
+          - $ref: '#/components/messages/OrderPaid'
+          - $ref: '#/components/messages/OrderCancelled'
+          - $ref: '#/components/messages/OrderShipped'
+
+    subscribe:
+      summary: Сервисы подписываются на события заказа
+      operationId: consumeOrderEvent
+      message:
+        oneOf:
+          - $ref: '#/components/messages/OrderCreated'
+          - $ref: '#/components/messages/OrderPaid'
+          - $ref: '#/components/messages/OrderCancelled'
+          - $ref: '#/components/messages/OrderShipped'
+
+components:
+  messages:
+    OrderCreated:
+      name: OrderCreated
+      title: Заказ создан
+      summary: Событие возникает при успешном создании заказа
+      contentType: application/json
+      payload:
+        type: object
+        required:
+          - eventId
+          - eventType
+          - eventVersion
+          - timestamp
+          - data
+        properties:
+          eventId:
+            type: string
+            format: uuid
+            description: Уникальный идентификатор события
+          eventType:
+            type: string
+            const: "OrderCreated"
+          eventVersion:
+            type: integer
+            const: 1
+            description: Версия схемы события для обратной совместимости
+          timestamp:
+            type: string
+            format: date-time
+            description: Момент возникновения события (UTC)
+          data:
+            type: object
+            required:
+              - orderId
+              - customerId
+              - items
+              - totalAmount
+            properties:
+              orderId:
+                type: string
+                format: uuid
+              customerId:
+                type: string
+                format: uuid
+              items:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    productId:
+                      type: string
+                      format: uuid
+                    productName:
+                      type: string
+                    quantity:
+                      type: integer
+                    unitPrice:
+                      type: number
+                      format: decimal
+              totalAmount:
+                type: number
+                format: decimal
+              deliveryDate:
+                type: string
+                format: date
+                description: Планируемая дата доставки
+
+    OrderPaid:
+      name: OrderPaid
+      title: Заказ оплачен
+      payload:
+        type: object
+        required:
+          - eventId
+          - eventType
+          - eventVersion
+          - timestamp
+          - data
+        properties:
+          eventId:
+            type: string
+            format: uuid
+          eventType:
+            type: string
+            const: "OrderPaid"
+          eventVersion:
+            type: integer
+            const: 1
+          timestamp:
+            type: string
+            format: date-time
+          data:
+            type: object
+            required:
+              - orderId
+              - paymentId
+              - paymentMethod
+              - amount
+            properties:
+              orderId:
+                type: string
+                format: uuid
+              paymentId:
+                type: string
+                format: uuid
+              paymentMethod:
+                type: string
+                enum: [CARD, SBP, YANDEX_PAY, APPLE_PAY]
+              amount:
+                type: number
+                format: decimal
+
+    OrderCancelled:
+      name: OrderCancelled
+      title: Заказ отменён
+      payload:
+        type: object
+        required:
+          - eventId
+          - eventType
+          - eventVersion
+          - timestamp
+          - data
+        properties:
+          eventId:
+            type: string
+            format: uuid
+          eventType:
+            type: string
+            const: "OrderCancelled"
+          eventVersion:
+            type: integer
+            const: 1
+          timestamp:
+            type: string
+            format: date-time
+          data:
+            type: object
+            required:
+              - orderId
+              - reason
+            properties:
+              orderId:
+                type: string
+                format: uuid
+              reason:
+                type: string
+                enum: [PAYMENT_FAILED, OUT_OF_STOCK, CUSTOMER_CANCELLED, FRAUD_DETECTED]
+              refundId:
+                type: string
+                format: uuid
+                description: Идентификатор возврата (если оплата прошла)
+
+    OrderShipped:
+      name: OrderShipped
+      title: Заказ отгружен
+      payload:
+        type: object
+        required:
+          - eventId
+          - eventType
+          - eventVersion
+          - timestamp
+          - data
+        properties:
+          eventId:
+            type: string
+            format: uuid
+          eventType:
+            type: string
+            const: "OrderShipped"
+          eventVersion:
+            type: integer
+            const: 1
+          timestamp:
+            type: string
+            format: date-time
+          data:
+            type: object
+            required:
+              - orderId
+              - trackingNumber
+              - carrier
+            properties:
+              orderId:
+                type: string
+                format: uuid
+              trackingNumber:
+                type: string
+              carrier:
+                type: string
+                enum: [CDEK, BOXBERRY, RUSSIAN_POST, PICKPOINT]
+```
+
+> 💡 **Совет системного аналитика:** В AsyncAPI-контракте всегда указывайте `eventVersion`. Когда через полгода вы измените структуру события, старые потребители не сломаются — они увидят версию и смогут обработать или проигнорировать новое поле. Без версионирования миграция событий — это боль и продовольственные ночные деплои.
+
+**[КОНЕЦ ДОПОЛНЕНИЯ SA]**
+
+---
+
+SAGA — это не аббревиатура в строгом смысле (не S.A.G.A.), а название паттерна, отсылающее к «саге» — длинной истории, состоящей из множества эпизодов. Каждый «эпизод» — это отдельная локальная транзакция в своём сервисе, а вместе они образуют целостный бизнес-процесс.
+
 #### Saga Choreography
 
 ```mermaid
@@ -650,6 +1158,10 @@ sequenceDiagram
     end
 ```
 
+> ⚠️ **[ДОПОЛНЕНИЕ SA]** **Замечание системного аналитика:** В Choreography-подходе легко потерять сквозную трассировку. Когда 5 сервисов обмениваются событиями, а заказ не доехал до доставки — кто виноват? **Обязательно требуйте Correlation ID** (он же `eventId` в контракте выше) и логирование на каждом шаге. Иначе расследование инцидента превратится в гадание. **[КОНЕЦ ДОПОЛНЕНИЯ SA]**
+
+---
+
 #### Saga Orchestration
 
 ```mermaid
@@ -674,7 +1186,13 @@ sequenceDiagram
     ServiceA-->>Orchestrator: Компенсация выполнена
 ```
 
+> 💡 **[ДОПОЛНЕНИЕ SA]** **Совет системного аналитика:** Orchestration проще отлаживать — вся логика в одном оркестраторе. Но он становится единой точкой отказа (SPOF). В ТЗ обязательно закладывайте **репликацию оркестратора** и **persistence его состояния** (например, в PostgreSQL), чтобы при падении он мог восстановиться с последнего успешного шага, а не начинать заново. **[КОНЕЦ ДОПОЛНЕНИЯ SA]**
+
+---
+
 #### 2PC vs Saga
+
+Two-Phase Commit (2PC) — это протокол распределённых транзакций, который гарантирует строгую согласованность (strong consistency) между несколькими участниками. В отличие от SAGA, где согласованность достигается со временем (eventual consistency), 2PC даёт жёсткую гарантию «все или никто» прямо сейчас.
 
 | Критерий | 2PC (2-Phase Commit) | Saga |
 |----------|----------------------|------|
@@ -683,6 +1201,164 @@ sequenceDiagram
 | Блокировка | Да (замки на время транзакции) | Нет (компенсация при ошибке) |
 | Производительность | Низкая при большом числе участников | Высокая |
 | Применимость в микросервисах | Крайне редка | Стандарт де-факто |
+
+**[ДОПОЛНЕНИЕ SA: Блок 2 — Работа с данными и маппинг]**
+
+### 1.2. Трансформация данных: маппинг реляционной модели в событие Kafka
+
+Системному аналитику постоянно приходится описывать, как данные перетекают из одной системы в другую. Ниже — реальный кейс: заказ из реляционной БД маппится в JSON-событие для Kafka.
+
+#### 1.2.1. Исходная реляционная модель (упрощённо)
+
+```sql
+-- Таблица заказов
+CREATE TABLE orders (
+    id              UUID PRIMARY KEY,
+    customer_id     UUID NOT NULL,
+    status          VARCHAR(20) NOT NULL DEFAULT 'CREATED',
+    total_amount    DECIMAL(12,2) NOT NULL,
+    promo_code      VARCHAR(20),
+    delivery_date   DATE,
+    created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+-- Таблица позиций заказа
+CREATE TABLE order_items (
+    id          UUID PRIMARY KEY,
+    order_id    UUID NOT NULL REFERENCES orders(id),
+    product_id  UUID NOT NULL,
+    product_name VARCHAR(255) NOT NULL,
+    quantity    INTEGER NOT NULL CHECK (quantity > 0),
+    unit_price  DECIMAL(12,2) NOT NULL,
+    CONSTRAINT fk_order FOREIGN KEY (order_id) REFERENCES orders(id)
+);
+
+-- Таблица адресов доставки
+CREATE TABLE delivery_addresses (
+    id          UUID PRIMARY KEY,
+    order_id    UUID NOT NULL REFERENCES orders(id),
+    country     VARCHAR(100) NOT NULL,
+    city        VARCHAR(100) NOT NULL,
+    street      VARCHAR(200) NOT NULL,
+    building    VARCHAR(20) NOT NULL,
+    apartment   VARCHAR(20),
+    zip_code    VARCHAR(10),
+    CONSTRAINT fk_order_address FOREIGN KEY (order_id) REFERENCES orders(id)
+);
+```
+
+#### 1.2.2. Целевой JSON (событие OrderCreated для Kafka)
+
+```json
+{
+  "eventId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "eventType": "OrderCreated",
+  "eventVersion": 1,
+  "timestamp": "2024-11-20T14:30:00.123Z",
+  "data": {
+    "orderId": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+    "customerId": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+    "status": "CREATED",
+    "totalAmount": 4599.97,
+    "promoCode": "WELCOME2024",
+    "deliveryDate": "2024-11-25",
+    "deliveryAddress": {
+      "country": "Россия",
+      "city": "Москва",
+      "street": "Тверская",
+      "building": "12",
+      "apartment": "45",
+      "zipCode": "125009"
+    },
+    "items": [
+      {
+        "productId": "d4e5f6a7-b8c9-0123-defa-234567890123",
+        "productName": "Смартфон X Pro",
+        "quantity": 1,
+        "unitPrice": 3499.99
+      },
+      {
+        "productId": "e5f6a7b8-c9d0-1234-efab-345678901234",
+        "productName": "Чехол силиконовый",
+        "quantity": 2,
+        "unitPrice": 549.99
+      }
+    ]
+  }
+}
+```
+
+#### 1.2.3. Таблица маппинга (mapping table)
+
+| Поле в БД (orders) | Поле в JSON | Тип в БД | Тип в JSON | Трансформация |
+|---|---|---|---|---|
+| `orders.id` | `data.orderId` | UUID | string (uuid) | Прямое копирование |
+| `orders.customer_id` | `data.customerId` | UUID | string (uuid) | Прямое копирование |
+| `orders.status` | `data.status` | VARCHAR(20) | string (enum) | Прямое копирование |
+| `orders.total_amount` | `data.totalAmount` | DECIMAL(12,2) | number (decimal) | CAST to decimal |
+| `orders.promo_code` | `data.promoCode` | VARCHAR(20) | string | Прямое копирование; если NULL — не включать в JSON |
+| `orders.delivery_date` | `data.deliveryDate` | DATE | string (date) | Форматирование в ISO 8601: `yyyy-MM-dd` |
+| `orders.created_at` | `timestamp` | TIMESTAMP | string (date-time) | Форматирование в ISO 8601: `yyyy-MM-dd'T'HH:mm:ss.SSS'Z'` |
+| `delivery_addresses.*` | `data.deliveryAddress` | — | object | JOIN по `order_id`, все поля маппятся 1:1 |
+| `order_items.*` | `data.items[]` | — | array | JOIN по `order_id`, каждая строка → элемент массива |
+
+> ⚠️ **Замечание системного аналитика:** В таблице маппинга критически важно указывать **обработку NULL**. Пример: `promo_code` может быть NULL. Если вы просто скопируете NULL в JSON, потребитель получит `"promoCode": null`, что может сломать его десериализацию. **Правило:** опциональные поля с NULL-значением либо не включаются в JSON вообще, либо включаются с дефолтным значением. Прописывайте это в контракте явно.
+
+#### 1.2.4. SQL-запрос для сборки денормализованной витрины
+
+Типовая задача аналитика: собрать плоскую таблицу для отчёта «Заказы с детализацией по товарам и адресам».
+
+```sql
+WITH order_base AS (
+    SELECT
+        o.id                                                          AS order_id,
+        o.customer_id,
+        o.status,
+        o.total_amount,
+        o.promo_code,
+        o.delivery_date,
+        o.created_at,
+        da.country,
+        da.city,
+        da.street,
+        da.building,
+        da.apartment,
+        da.zip_code
+    FROM orders o
+    LEFT JOIN delivery_addresses da ON da.order_id = o.id
+    WHERE o.created_at >= '2024-01-01'  -- фильтр по дате для инкрементальной загрузки
+)
+SELECT
+    ob.order_id,
+    ob.customer_id,
+    ob.status,
+    ob.total_amount,
+    ob.promo_code,
+    ob.delivery_date,
+    ob.created_at,
+    ob.country          AS delivery_country,
+    ob.city             AS delivery_city,
+    ob.street           AS delivery_street,
+    ob.building         AS delivery_building,
+    ob.apartment        AS delivery_apartment,
+    ob.zip_code         AS delivery_zip,
+    oi.id               AS item_id,
+    oi.product_id,
+    oi.product_name,
+    oi.quantity,
+    oi.unit_price,
+    (oi.quantity * oi.unit_price) AS item_total
+FROM order_base ob
+LEFT JOIN order_items oi ON oi.order_id = ob.order_id
+ORDER BY ob.order_id, oi.id;
+```
+
+> 💡 **Совет системного аналитика:** Этот запрос — классическая «звезда» (star schema) в действии. Обратите внимание: я использую `LEFT JOIN`, а не `INNER JOIN`, потому что заказ может быть без товаров (крайний случай — отменён до добавления позиций). В реальной витрине для отчётов **всегда проверяйте бизнес-правило**: может ли быть заказ без позиций? Если нет — смело ставьте `INNER JOIN`, это ускорит запрос.
+
+**[КОНЕЦ ДОПОЛНЕНИЯ SA]**
+
+---
 
 #### Outbox Pattern
 
@@ -753,7 +1429,7 @@ public class OutboxService {
     public void saveEvent(String aggregateType, String aggregateId, 
                           String eventType, Object payload) {
         jdbc.update(
-            "INSERT INTO outbox (id, aggregate_type, aggregate_id, event_type, payload) VALUES (?, ?, ?, ?, ?::jsonb)",
+            'INSERT INTO outbox (id, aggregate_type, aggregate_id, event_type, payload) VALUES (?, ?, ?, ?, ?::jsonb)',
             UUID.randomUUID(), aggregateType, aggregateId, eventType, toJson(payload)
         );
     }
@@ -766,20 +1442,24 @@ public class OutboxPublisher {
     @Transactional
     public void publishPendingEvents() {
         List<OutboxEvent> events = jdbc.query(
-            "SELECT * FROM outbox WHERE sent_at IS NULL ORDER BY created_at LIMIT 100",
+            'SELECT * FROM outbox WHERE sent_at IS NULL ORDER BY created_at LIMIT 100',
             eventRowMapper
         );
         for (OutboxEvent event : events) {
             try {
                 kafkaTemplate.send(event.getEventType(), event.getPayload());
-                jdbc.update("UPDATE outbox SET sent_at = NOW() WHERE id = ?", event.getId());
+                jdbc.update('UPDATE outbox SET sent_at = NOW() WHERE id = ?', event.getId());
             } catch (Exception e) {
-                log.error("Failed to send event: {}", event.getId(), e);
+                log.error('Failed to send event: {}', event.getId(), e);
             }
         }
     }
 }
 ```
+
+> ⚠️ **[ДОПОЛНЕНИЕ SA]** **Замечание системного аналитика:** В Outbox Publisher выше есть классическая проблема **двойной отправки** (duplicate delivery). Если Kafka-брокер ответил с таймаутом, но сообщение всё же было записано, publisher повторит отправку. Потребитель получит дубль. **Решение:** делайте идемпотентность на стороне потребителя — храните `eventId` обработанных событий и игнорируйте повторные. **[КОНЕЦ ДОПОЛНЕНИЯ SA]**
+
+---
 
 ### Ингос-секция: Паттерны в нашей системе
 
@@ -789,7 +1469,7 @@ public class OutboxPublisher {
 
 ### Практика
 
-Спроектируйте Saga для процесса "Оформление страхового полиса":
+Спроектируйте Saga для процесса 'Оформление страхового полиса':
 1. Клиент отправляет заявку
 2. Система проверяет данные (андеррайтинг)
 3. Расчёт тарифа
@@ -821,6 +1501,46 @@ public class OutboxPublisher {
 
 ---
 
+**[ДОПОЛНЕНИЕ SA: Блок 3 — Диаграммы и визуализация систем]**
+
+### 1.3. ASCII-диаграммы для спецификаций
+
+В реальной работе вы не всегда сможете вставить Mermaid или картинку в ТЗ (например, заказчик просит текстовый документ или Wiki без поддержки графики). Ниже — ASCII-диаграммы, которые можно вставить в любой текстовый документ.
+
+#### 1.3.1. Sequence diagram (ASCII): «Пользователь оформляет заказ»
+
+```
+Фронт                Бэк              Kafka/Warehouse         Склад (WMS)
+  |                   |                    |                      |
+  |--- POST /orders -->|                   |                      |
+  |                   |--- validate ---->  |                      |
+  |                   |<-- ok -----------  |                      |
+  |                   |                    |                      |
+  |                   |--- save to DB ---> |                      |
+  |                   |<-- saved --------- |                      |
+  |                   |                    |                      |
+  |                   |--- outbox: ------->|                      |
+  |                   |    OrderCreated    |                      |
+  |                   |                    |                      |
+  |<-- 201 Created ---|                    |                      |
+  |                   |                    |                      |
+  |                   |                    |--- InventoryService  |
+  |                   |                    |    .reserve() ------>|
+  |                   |                    |                      |
+  |                   |                    |<-- reserved ---------|
+  |                   |                    |                      |
+  |                   |                    |--- PaymentService    |
+  |                   |                    |    .charge() ------->|
+  |                   |                    |                      |
+  |                   |                    |<-- charged ----------|
+  |                   |                    |                      |
+  |                   |                    |--- NotificationSvc   |
+  |                   |                    |    .sendEmail() ---->|
+  |                   |                    |                      |
+```
+
+>
+
 ## Модуль I-3. Многопоточность
 
 ### Цели модуля
@@ -830,7 +1550,194 @@ public class OutboxPublisher {
 - Применять примитивы синхронизации
 - Рассчитывать размер пула потоков
 
-### Теоретическая часть
+### Красные флаги многопоточности — чек-лист системного аналитика
+
+Если в проектируемой системе видишь хотя бы один из этих признаков —
+проблемы с конкурентным доступом в продакшене гарантированы.
+Не нужно ждать нагрузочного тестирования, чтобы это понять.
+
+---
+
+#### Флаг 1. Разделяемое изменяемое состояние
+
+> **Признак:** Одна и та же переменная, запись в БД, строка кэша или поле конфигурации
+> меняется из нескольких потоков, сессий или экземпляров приложения.
+
+**Пример:** Счётчик посещений, хранящийся в статическом поле.
+
+**Что произойдёт:** Race condition. Два потока прочитали `count = 5`, оба увеличили до 6,
+оба записали 6. Потеряно одно увеличение.
+
+**Где проявляется:** При нагрузке больше одного пользователя. Воспроизводится нестабильно.
+
+---
+
+#### Флаг 2. Операция «прочитать — подумать — записать»
+
+> **Признак:** Бизнес-логика читает значение из БД или памяти, принимает решение на его основе,
+> затем пишет обновлённое значение обратно. Между чтением и записью нет блокировки.
+
+**Пример:** Прочитал баланс = 1000, вычел 500, записал 500.
+Другая сессия в это же время тоже прочитала 1000.
+
+**Что произойдёт:** Потерянное обновление (lost update).
+Обе операции применятся к устаревшему значению.
+
+**Где проявляется:** Периодические неконсистентные данные, которые невозможно
+воспроизвести под отладчиком.
+
+---
+
+#### Флаг 3. Нет упоминания транзакций или блокировок в ТЗ
+
+> **Признак:** В техническом задании описана бизнес-логика, но ни слова про
+> `SELECT FOR UPDATE`, `lock`, `synchronized`, `transaction`, `isolation level`.
+
+**Пример:** «Система должна списать товар со склада при оформлении заказа».
+
+**Что произойдёт:** Разработчик реализует простым `UPDATE` без проверки остатка
+и без блокировки. При 10 одновременных заказах на последнюю единицу товара —
+уйдёт в минус или продастся дважды.
+
+**Где проявляется:** Первая же реальная нагрузка. На стейдже с одним пользователем всё работало.
+
+---
+
+#### Флаг 4. Кустарная генерация уникальных идентификаторов
+
+> **Признак:** В коде или ТЗ встречается `SELECT MAX(id) + 1`, `COUNT(*) + 1`,
+> GUID на клиенте, `DateTime.Now.Ticks` как идентификатор.
+
+**Пример:** `SELECT NVL(MAX(order_no), 0) + 1 FROM orders`.
+
+**Что произойдёт:** Две параллельные сессии получат одинаковый номер.
+Дубликаты ключей, нарушение уникальности, ошибки вставки.
+
+**Где проявляется:** Как только два пользователя создают сущность одновременно.
+Может не проявляться месяцами, если пользователей мало.
+
+---
+
+#### Флаг 5. Справочник обновляется без блокировки на время чтения
+
+> **Признак:** Один процесс обновляет справочник (тарифы, курсы валют, скидки),
+> а другой в этот же момент читает его для расчёта.
+
+**Пример:** Финансовый расчёт читает курс валюты. В середине расчёта курс обновляется
+фоновым заданием. Часть строк посчитана по старому курсу, часть — по новому.
+
+**Что произойдёт:** «Грязное чтение» (dirty read) или «фантомное чтение» (phantom read).
+Неконсистентный отчёт, который невозможно перепроверить.
+
+**Где проявляется:** Редкие, плавающие баги. Расхождение итогов на копейки,
+которые накапливаются в миллионы.
+
+---
+
+#### Флаг 6. Списание или резервирование без атомарной проверки остатка
+
+> **Признак:** Операция списания реализована как два отдельных действия:
+> проверить остаток, затем списать. Либо проверка есть, но без блокировки строки.
+
+**Пример:**
+
+```sql
+SELECT quantity INTO v_qty FROM inventory WHERE sku = :sku;
+IF v_qty >= :requested THEN
+    UPDATE inventory SET quantity = quantity - :requested WHERE sku = :sku;
+END IF;
+```
+
+**Что произойдёт:** Две сессии одновременно прошли проверку (остаток = 1, запросили по 1).
+Обе списали. Остаток стал -1.
+
+**Где проявляется:** Пик нагрузки, распродажи, чёрная пятница.
+Самый дорогой баг — отрицательные остатки на складе.
+
+#### Флаг 7. Фоновый процесс и пользовательский сценарий меняют одни и те же данные
+
+> **Признак:** Есть ночной батч, крон или фоновый job, который меняет те же таблицы,
+> что и пользовательские операции днём. Либо дневной батч, пересекающийся с активностью.
+
+**Пример:** Закрытие финансового периода (батч, 2 часа) + бухгалтер вручную
+сторнирует проводку в этом же периоде.
+
+**Что произойдёт:** Непредсказуемый порядок изменений. Батч может перетереть
+ручную правку. Или наоборот — ручная правка сломает агрегацию батча.
+
+**Где проявляется:** Ночные инциденты. Утром данные не сходятся.
+
+---
+
+#### Флаг 8. Упомянут «кеш в памяти» без плана инвалидации и синхронизации
+
+> **Признак:** В архитектуре или коде встречаются слова «in-memory cache»,
+> «статическая переменная», `ConcurrentDictionary`, `HashMap`, но нет
+> описания того, как экземпляры приложения синхронизируют этот кеш.
+
+**Пример:** Кеш справочника товаров в `static Dictionary`. Обновили товар
+через админку на одном инстансе — второй инстанс продолжает отдавать старые данные.
+
+**Что произойдёт:** Разные пользователи видят разные данные в зависимости от того,
+на какой инстанс попали. Баг не воспроизводится при повторном запросе — попал на другой инстанс.
+
+**Где проявляется:** При масштабировании на несколько экземпляров приложения.
+На одном инстансе всё работало идеально.
+
+---
+
+#### Флаг 9. API возвращает 200 OK до фактической фиксации данных
+
+> **Признак:** Сервис принял запрос, поставил задачу в очередь, ответил 200 или 202,
+> но данные ещё не сохранены и не закоммичены. Клиент немедленно делает GET
+> и не находит свои данные.
+
+**Пример:** `POST /orders` → сообщение в Kafka → `200 OK`. Клиент сразу делает
+`GET /orders/123` → `404 Not Found`.
+
+**Что произойдёт:** Повторные запросы от клиента, дубликаты заказов,
+жалобы в поддержку «мой заказ потерялся».
+
+**Где проявляется:** Асинхронные сценарии, высокая нагрузка, перезагрузка брокера.
+
+---
+
+#### Флаг 10. Таймауты и retry описаны без идемпотентности
+
+> **Признак:** В ТЗ написано: «При ошибке повторить запрос 3 раза с задержкой».
+> Но не написано, как отличить повторный запрос от нового, и как предотвратить
+> двойное выполнение.
+
+**Пример:** П платёжный шлюз. Таймаут на ответе. Сервис делает retry.
+Деньги списались дважды. Или заказ создался дважды.
+
+**Что произойдёт:** Двойные списания, дубликаты заказов, повторная отправка уведомлений.
+
+**Где проявляется:** Сетевые сбои, перезагрузка сервисов, высокая нагрузка.
+
+---
+
+#### Итоговая таблица: проблема → решение
+
+| Флаг | Суть проблемы | Направление решения |
+|------|--------------|---------------------|
+| **1. Разделяемое изменяемое состояние** | Race condition. Два потока читают одно значение, оба изменяют, оба пишут. Одно изменение потеряно | C#: `lock(obj)`, `Interlocked.Increment`<br/>Java: `synchronized`, `AtomicInteger`<br/>Oracle: `SELECT FOR UPDATE`, атомарный `UPDATE` |
+| **2. Операция «прочитал — подумал — записал»** | Lost update. Две сессии читают устаревшее значение и применяют к нему изменения | C#/Java: `SELECT FOR UPDATE` + транзакция<br/>Oracle: `SELECT ... FOR UPDATE`<br/>Либо оптимистичная блокировка: `UPDATE ... SET version = version + 1 WHERE version = :old_version` |
+| **3. Нет транзакций или блокировок в ТЗ** | Разработчик реализует без синхронизации. Неопределённое поведение под нагрузкой | Явно описать в ТЗ:<br/>— Границы транзакций<br/>— Уровень изоляции (`READ COMMITTED`, `REPEATABLE READ`)<br/>— Где нужны `SELECT FOR UPDATE`<br/>— Где нужен `lock` / `synchronized` |
+| **4. Кустарная генерация уникальных ID** | Дубликаты ключей. Две сессии получают одинаковый `MAX(id) + 1` | Oracle: `SEQUENCE` + `NEXTVAL`<br/>PostgreSQL: `SERIAL`, `BIGSERIAL`<br/>MSSQL: `IDENTITY`<br/>Распределённо: UUID v7, Snowflake, `NEWSEQUENTIALID()` |
+| **5. Справочник обновляется без блокировки на время чтения** | Грязное чтение. Отчёт частично по старому, частично по новому значению справочника | Минимум: `READ COMMITTED` (значение фиксируется на момент начала чтения строки)<br/>Для отчётов: `REPEATABLE READ` или `SERIALIZABLE`<br/>Альтернатива: снапшот справочника на момент начала расчёта |
+| **6. Списание или резервирование без атомарной проверки остатка** | Отрицательные остатки. Две сессии проходят проверку и обе списывают | Один атомарный запрос:<br/>`UPDATE inventory SET quantity = quantity - :n WHERE sku = :sku AND quantity >= :n`<br/>Проверить `rows affected = 1`, иначе отказать |
+| **7. Фоновый процесс и пользователь меняют одни и те же данные** | Перетирание данных. Батч перезаписывает ручную правку или наоборот | Статусная модель сущности: `ACTIVE → PROCESSING → ACTIVE`<br/>Явные блокировки: `SELECT FOR UPDATE` на время обработки<br/>Разведение по времени: батч только ночью, днём запрет на ручные правки |
+| **8. Кеш в памяти без плана инвалидации** | Рассогласование экземпляров. Разные инстансы приложения отдают разные данные | Вынести кеш во внешнее хранилище: Redis, Hazelcast<br/>Либо: инвалидация по TTL + Pub/Sub (Redis `PUBLISH` / `SUBSCRIBE`)<br/>Либо: отказаться от кеша, читать из БД |
+| **9. API возвращает 200 до фактической фиксации данных** | Клиент получает успех, но данных ещё нет. Повторные запросы, дубликаты, потерянные заказы | Read-your-writes гарантия: перед ответом 200 дождаться фиксации в своей БД<br/>Либо: явно документировать eventual consistency («данные появятся через N секунд»)<br/>Либо: `POST` возвращает `202 Accepted` + `Location` header для polling |
+| **10. Retry без идемпотентности** | Двойное выполнение. Деньги списаны дважды, заказ создан дважды, уведомление отправлено дважды | Идемпотентность через `idempotencyKey` (клиент генерирует, сервер дедуплицирует)<br/>Статусная модель: `PENDING → PROCESSING → COMPLETED` (повторный запрос видит финальный статус)<br/>Уникальный constraint на бизнес-ключ операции |
+
+---
+
+> **Короткое правило:** Если в ТЗ описана операция с состоянием и нет ни слова
+> про атомарность, блокировки или транзакции — ты только что нашёл баг,
+> который проявится на первом же нагрузочном тесте. Лучше исправить сейчас,
+> чем в 3 часа ночи в день запуска.
 
 #### Диаграмма состояний потока
 
@@ -901,7 +1808,61 @@ N_threads = N_cores * (1 + W / C)
 | I/O-bound (сеть) | ~100 | 808 |
 | Смешанный | ~3 | 32 |
 
+---
+
+[ДОПОЛНЕНИЕ SA]
+
+#### ⚠️ Замечание системного аналитика: W/C — не константа, а распределение
+
+Формула `N_threads = N_cores * (1 + W/C)` — это **приближение для steady-state**. В реальности W/C меняется от запроса к запросу. Если вы проектируете SLA для сервиса расчёта тарифов, учитывайте **p99 времени ответа**, а не среднее. Типичная ошибка: берут средний W/C, а на пике (когда БД тормозит) W/C улетает в 10 раз выше, и пул потоков перегружается.
+
+> 💡 **Совет:** закладывайте в ТЗ не только `N_threads`, но и **механизм backpressure** (например, rejection policy в ThreadPoolExecutor) и **timeout на каждый внешний вызов**. Без timeout при зависании БД пул потоков схлопнется за 30 секунд.
+``` mermaid
+graph LR
+    A["Сервис A<br/>(Producer)"] -->|"Отправка данных"| B["Буфер<br/>(ограничен!)<br/>Max = 100"]
+    B -->|"Вычитывание"| C["Сервис B<br/>(Consumer)"]
+
+    B -.->|"Сигнал обратного давления<br/>«Буфер полон, стой!»"| A
+
+    B -->|"Если буфер заполнен"| D{"Стратегия<br/>backpressure"}
+
+    D -->|"Стратегия 1"| E["⏸️ Блокировка продюсера<br/>(Thread.sleep / семафор)"]
+    D -->|"Стратегия 2"| F["🗑️ Сброс лишнего<br/>(drop + метрика)"]
+    D -->|"Стратегия 3"| G["⚡ Reactive Streams<br/>(Consumer запрашивает N)"]
+
+    E --> H["Продюсер ждёт<br/>освобождения места"]
+    F --> I["Данные отброшены<br/>нет блокировки"]
+    G --> J["Продюсер отправляет<br/>ровно сколько просят"]
+
+    style B fill:#ffaa00,stroke:#884400,color:#000
+    style D fill:#aa66ff,stroke:#6622aa,color:#fff
+    style E fill:#ff8800,stroke:#884400,color:#fff
+    style F fill:#ff4444,stroke:#880000,color:#fff
+    style G fill:#4488ff,stroke:#224488,color:#fff
+```			  
+[КОНЕЦ ДОПОЛНЕНИЯ SA]
+
+---
+
+[ДОПОЛНЕНИЕ BA]
+
+#### ⚠️ Внимание, грабли! W/C — не константа, а распределение
+
+Формула `N_threads = N_cores * (1 + W/C)` — это **приближение для steady-state**. В реальности W/C меняется от запроса к запросу. Если вы проектируете SLA для сервиса расчёта тарифов, учитывайте **p99 времени ответа**, а не среднее. Типичная ошибка: берут средний W/C, а на пике (когда БД тормозит) W/C улетает в 10 раз выше, и пул потоков перегружается.
+
+> 💡 **Совет BA:** закладывайте в ТЗ не только `N_threads`, но и **механизм backpressure** (например, rejection policy в ThreadPoolExecutor) и **timeout на каждый внешний вызов**. Без timeout при зависании БД пул потоков схлопнется за 30 секунд.
+
+[КОНЕЦ ДОПОЛНЕНИЯ BA]
+
+---
+
+> 🔗 **Связующий комментарий:** Оба аналитика (SA и BA) независимо указали на одну и ту же проблему — нестабильность W/C. Это подтверждает, что вопрос критически важен. SA акцентирует техническую сторону (распределение, p99), BA — управленческую (закладывать в ТЗ, согласовывать со стейкхолдерами). Рекомендуется учитывать обе перспективы.
+
+---
+
 ### Примеры кода
+
+Race condition (состояние гонки) — это ситуация, когда два или более потока одновременно обращаются к общим данным, и итоговый результат зависит от того, как перекрываются их операции во времени. Результат непредсказуем, потому что ты не контролируешь, в каком порядке планировщик ОС переключит потоки.
 
 #### Race Condition и её решение
 
@@ -927,37 +1888,405 @@ public void increment() {
 }
 ```
 
-#### CompletableFuture для асинхронных задач
+```sql
+-- Race Condition — ТАК НЕЛЬЗЯ
+-- Сессия 1 и Сессия 2 одновременно вызывают процедуру
 
-```java
-private final ExecutorService executor = 
-    Executors.newFixedThreadPool(10);
+CREATE OR REPLACE PROCEDURE increment_counter AS
+    v_count NUMBER;
+BEGIN
+    SELECT counter_value INTO v_count 
+    FROM counters 
+    WHERE counter_id = 1;
+    
+    v_count := v_count + 1;  -- Обе сессии прочитали одно и то же значение!
+    
+    UPDATE counters 
+    SET counter_value = v_count 
+    WHERE counter_id = 1;
+    
+    COMMIT;
+END;
 
-public CompletableFuture<Policy> calculatePrice(QuoteRequest request) {
-    return CompletableFuture
-        .supplyAsync(() -> validateQuote(request), executor)
-        .thenApplyAsync(validated -> calculateTariff(validated), executor)
-        .thenApplyAsync(tariff -> applyDiscounts(tariff), executor)
-        .exceptionally(ex -> {
-            log.error("Failed to calculate price", ex);
-            return Policy.defaultFallback();
-        });
-}
+// 1 - Атомарный update
+
+// 2 - dbms_lock
+
+// 3 - select ... for update
 ```
 
-#### Виртуальные потоки (Java 21+)
+[ДОПОЛНЕНИЕ SA]
 
-```java
-// Virtual threads - каждая задача в своём виртуальном потоке
-try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-    List<Future<Policy>> futures = requests.stream()
-        .map(req -> executor.submit(() -> processQuote(req)))
-        .toList();
-    for (Future<Policy> future : futures) {
-        policies.add(future.get());
+#### ⚠️ Замечание системного аналитика: race condition на уровне данных — ваша зона ответственности
+
+Как системный аналитик, вы должны описать **границы транзакций** в спецификации. Race condition возникает не только в коде, но и на уровне интеграций. Пример: два микросервиса одновременно обновляют статус полиса через REST. Если нет версионирования (optimistic lock), последний запрос перетирает данные первого.
+
+> 💡 **Совет:** в контракте API для ресурса, который может изменяться конкурентно, всегда добавляйте поле `version` (или `etag`). В спецификации OpenAPI это выглядит так:
+
+```yaml
+components:
+  schemas:
+    Policy:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+          description: "Используется для optimistic locking. При обновлении клиент обязан передать текущую версию."
+        status:
+          type: string
+          enum: [DRAFT, ACTIVE, CANCELLED]
+      required: [id, version, status]
+```
+
+[КОНЕЦ ДОПОЛНЕНИЯ SA]
+
+---
+
+#### C# (.NET): Task + async/await (аналог CompletableFuture в java)
+
+```csharp
+// Асинхронный пайплайн расчёта цены полиса
+public class PolicyCalculator
+{
+    // Собственный пул потоков (ограниченный, с backpressure)
+    private readonly SemaphoreSlim _throttle = new SemaphoreSlim(10);
+    
+    public async Task<Policy> CalculatePriceAsync(QuoteRequest request)
+    {
+        await _throttle.WaitAsync();  // Backpressure: ждём, пока освободится слот
+        try
+        {
+            var validated = await ValidateQuoteAsync(request);
+            var tariff = await CalculateTariffAsync(validated);
+            var discounted = await ApplyDiscountsAsync(tariff);
+            return discounted;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to calculate price");
+            return Policy.DefaultFallback();
+        }
+        finally
+        {
+            _throttle.Release();  // Освобождаем слот
+        }
+    }
+    
+    private async Task<ValidatedQuote> ValidateQuoteAsync(QuoteRequest request)
+    {
+        // Имитация: валидация через внешний API
+        await Task.Delay(50);  // Не блокирует поток!
+        return new ValidatedQuote();
+    }
+    
+    private async Task<Tariff> CalculateTariffAsync(ValidatedQuote validated)
+    {
+        await Task.Delay(100);
+        return new Tariff();
+    }
+    
+    private async Task<Policy> ApplyDiscountsAsync(Tariff tariff)
+    {
+        await Task.Delay(30);
+        return new Policy();
+    }
+}
+
+// Использование: параллельный расчёт для множества запросов
+var calculator = new PolicyCalculator();
+var tasks = requests.Select(r => calculator.CalculatePriceAsync(r));
+Policy[] results = await Task.WhenAll(tasks);  // Все запускаются параллельно
+```
+
+#### C# (.NET): Channel<T> — асинхронный Producer/Consumer с backpressure
+
+```csharp
+// Аналог BlockingQueue, но полностью асинхронный
+var channel = Channel.CreateBounded<QuoteRequest>(new BoundedChannelOptions(100)
+{
+    FullMode = BoundedChannelFullMode.Wait  // Backpressure: продюсер ЖДЁТ
+});
+
+// Producer
+async Task ProduceAsync()
+{
+    foreach (var request in requests)
+    {
+        await channel.Writer.WriteAsync(request);  // Если канал полон — ждём
+    }
+    channel.Writer.Complete();
+}
+
+// Consumer (множество параллельных)
+async Task ConsumeAsync()
+{
+    await foreach (var request in channel.Reader.ReadAllAsync())
+    {
+        await CalculatePriceAsync(request);
     }
 }
 ```
+
+#### PL/SQL (Oracle): DBMS_SCHEDULER + асинхронные задания
+
+```sql
+-- 1. Параллельное выполнение через DBMS_PARALLEL_EXECUTE
+-- 2. Планирование асинхронных заданий (fire-and-forget)
+-- 3. Асинхронный вызов HTTP-сервиса (Oracle 21c+)
+DECLARE
+    v_response CLOB;
+BEGIN
+    -- Отправляем запрос к внешнему API расчёта тарифа и НЕ ЖДЁМ
+    APEX_WEB_SERVICE.MAKE_REST_REQUEST_ASYNC(
+        p_url         => 'https://tariff-api.internal/calculate',
+        p_http_method => 'POST',
+        p_body        => '{ "requestId": ' || p_request_id || ' }',
+        p_callback    => 'calculate_price_pkg.handle_tariff_response'  -- Колбэк
+    );
+    -- Управление вернулось сразу, ответ придёт позже в handle_tariff_response
+END;
+```
+
+### Нефункциональные требования к модулю расчёта цены
+
+| Параметр | Значение |
+|----------|----------|
+| **Платформа** | .NET 8, ASP.NET Core |
+| **Модель асинхронности** | Task + async/await + SemaphoreSlim для backpressure |
+| **Максимальная конкурентность (throttle)** | 10 одновременных расчётов |
+| **Очередь ожидания** | BoundedChannel (Max = 100), стратегия Wait |
+| **Fallback** | Policy.DefaultFallback() при ошибке |
+| **Распараллеливание** | `Task.WhenAll()` для независимых запросов |
+| **Таймаут операции** | 30 секунд через `CancellationToken` |
+| **Ожидаемый p99 latency** | < 500 мс |
+| **Целевой throughput** | 200 запросов/сек |
+
+---
+
+[ДОПОЛНЕНИЕ SA]
+
+### Проектирование контрактов: OpenAPI и AsyncAPI для многопоточных сервисов
+
+Системный аналитик должен уметь описывать **интеграционные контракты** для сервисов, работающих с многопоточностью. Ниже — реальные примеры.
+
+#### 1. OpenAPI-спецификация для REST-эндпоинта расчёта тарифа
+
+Этот эндпоинт вызывается фронтом и внутри использует пул потоков для параллельного сбора данных.
+
+```yaml
+openapi: 3.0.3
+info:
+  title: Tariff Calculation Service
+  version: 1.0.0
+  description: |
+    Сервис расчёта страховых тарифов.
+    Внутренняя многопоточность: запросы к БД, внешним API скоринга и истории
+    выполняются параллельно через CompletableFuture.
+    Пул потоков: fixed (8 потоков), rejection policy — CallerRunsPolicy.
+
+paths:
+  /api/v1/tariff/calculate:
+    post:
+      summary: Рассчитать тариф по заявке
+      operationId: calculateTariff
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuoteRequest'
+      responses:
+        '200':
+          description: Успешный расчёт
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TariffResponse'
+        '429':
+          description: Too Many Requests — сервис перегружен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Service Unavailable — пул потоков исчерпан
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      x-ratelimit:
+        limit: 1000
+        period: "1s"
+        description: "Максимум 1000 запросов в секунду. При превышении — 429."
+
+components:
+  schemas:
+    QuoteRequest:
+      type: object
+      required: [clientId, productCode, sumInsured]
+      properties:
+        clientId:
+          type: string
+          format: uuid
+          example: "a1b2c3d4-1234-5678-9abc-def012345678"
+        productCode:
+          type: string
+          example: "KASKO-2024"
+        sumInsured:
+          type: number
+          format: double
+          example: 1500000.00
+        additionalData:
+          type: object
+          description: "Доп. поля для скоринга (опционально)"
+          properties:
+            vehicleYear:
+              type: integer
+              example: 2022
+            driverExperience:
+              type: integer
+              example: 5
+
+    TariffResponse:
+      type: object
+      properties:
+        calculationId:
+          type: string
+          format: uuid
+        premium:
+          type: number
+          format: double
+          description: "Итоговая премия"
+        breakdown:
+          type: object
+          properties:
+            baseTariff:
+              type: number
+            discount:
+              type: number
+            loading:
+              type: number
+        processingTimeMs:
+          type: integer
+          description: "Фактическое время обработки (для мониторинга SLA)"
+
+    ErrorResponse:
+      type: object
+      properties:
+        code:
+          type: string
+          example: "THREAD_POOL_EXHAUSTED"
+        message:
+          type: string
+          example: "All worker threads are busy. Retry later."
+        retryAfterMs:
+          type: integer
+          example: 500
+```
+
+> 💡 **Совет:** в OpenAPI-спецификации для многопоточного сервиса обязательно указывайте **лимиты (rate limiting)** и **коды ошибок, связанные с перегрузкой** (429, 503). Это часть нефункциональных требований, которую аналитик должен согласовать с заказчиком.
+
+#### 2. AsyncAPI-контракт для событийной интеграции (Kafka)
+
+Когда сервис расчёта завершает обработку, он публикует событие в Kafka. Другие сервисы (уведомления, история, аналитика) подписываются асинхронно.
+
+```yaml
+asyncapi: 2.6.0
+info:
+  title: Tariff Events
+  version: 1.0.0
+  description: |
+    События, публикуемые сервисом расчёта тарифов.
+    Каждое событие — результат асинхронной обработки в пуле потоков.
+    Гарантия доставки: at-least-once.
+    Порядок сообщений: не гарантируется (ключ партиции — calculationId).
+
+channels:
+  tariff.calculation.completed:
+    publish:
+      operationId: onTariffCalculationCompleted
+      message:
+        $ref: '#/components/messages/TariffCalculated'
+      bindings:
+        kafka:
+          topic: tariff.calculation.completed
+          partitions: 6
+          replicas: 2
+
+  tariff.calculation.failed:
+    publish:
+      operationId: onTariffCalculationFailed
+      message:
+        $ref: '#/components/messages/TariffCalculationFailed'
+      bindings:
+        kafka:
+          topic: tariff.calculation.failed
+          partitions: 3
+          replicas: 2
+
+components:
+  messages:
+    TariffCalculated:
+      name: TariffCalculatedEvent
+      title: Тариф рассчитан успешно
+      contentType: application/json
+      payload:
+        type: object
+        required: [calculationId, clientId, premium, timestamp]
+        properties:
+          calculationId:
+            type: string
+            format: uuid
+            description: "Идентификатор расчёта"
+          clientId:
+            type: string
+            format: uuid
+          premium:
+            type: number
+            format: double
+          timestamp:
+            type: string
+            format: date-time
+          breakdown:
+            type: object
+            properties:
+              baseTariff:
+                type: number
+              discount:
+                type: number
+              loading:
+                type: number
+
+    TariffCalculationFailed:
+      name: TariffCalculationFailedEvent
+      title: Ошибка расчёта тарифа
+      contentType: application/json
+      payload:
+        type: object
+        required: [calculationId, clientId, reason, timestamp]
+        properties:
+          calculationId:
+            type: string
+            format: uuid
+          clientId:
+            type: string
+            format: uuid
+          reason:
+            type: string
+            enum: [VALIDATION_ERROR, EXTERNAL_TIMEOUT, INTERNAL_ERROR, THREAD_POOL_EXHAUSTED]
+          timestamp:
+            type: string
+            format: date-time
+```
+
+> ⚠️ **Замечание системного аналитика:** AsyncAPI-контракт — это аналог OpenAPI для событийных систем. Если ваш сервис публикует события в Kafka/RabbitMQ, **обязательно** описывайте контракт. Типичная ошибка: разработчик-потребитель узнаёт структуру события из логов, а не из документации. AsyncAPI решает эту проблему.
+
+[КОНЕЦ ДОПОЛНЕНИЯ SA]
+
+---
 
 ### Ингос-секция: Многопоточность у нас
 
@@ -965,6 +2294,7 @@ try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
 - I/O-задачи (запросы к внешним API): Cached thread pool
 - Проблемы: Race condition при параллельном обновлении полиса
 - Решение: Оптимистическая блокировка через version-поле
+
 
 ### Практика
 
@@ -985,14 +2315,100 @@ CPU_cores_needed = 1000 * 0.05 / 0.8 = 62.5 ~ 64 cores
 
 </details>
 
-### Контрольные вопросы
-
-1. В чём разница между deadlock и livelock?
-2. Когда использовать synchronized, а когда ReentrantLock?
-3. Как виртуальные потоки (Java 21) меняют подход к пулам потоков?
-4. Что такое false sharing и как его избежать?
-
 ---
+
+[ДОПОЛНЕНИЕ SA]
+
+### Работа с данными и маппинг: от реляционной БД к событию Kafka
+
+Системный аналитик часто проектирует **трансформацию данных** между системами. Ниже — реальный пример маппинга объекта «Заказ» из реляционной БД в JSON-событие для Kafka.
+
+#### Пример маппинга: Order → OrderCreatedEvent
+
+**Исходная схема БД (реляционная):**
+
+```sql
+-- Таблица заказов
+CREATE TABLE orders (
+    order_id       UUID PRIMARY KEY,
+    client_id      UUID NOT NULL,
+    product_code   VARCHAR(20) NOT NULL,
+    sum_insured    DECIMAL(15,2) NOT NULL,
+    status         VARCHAR(20) NOT NULL DEFAULT 'DRAFT',
+    created_at     TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMP NOT NULL DEFAULT NOW(),
+    version        INTEGER NOT NULL DEFAULT 1
+);
+
+-- Таблица позиций заказа (1:N)
+CREATE TABLE order_items (
+    item_id        UUID PRIMARY KEY,
+    order_id       UUID NOT NULL REFERENCES orders(order_id),
+    item_type      VARCHAR(50) NOT NULL,
+    item_value     DECIMAL(15,2) NOT NULL,
+    description    TEXT
+);
+
+-- Таблица скидок (1:1)
+CREATE TABLE order_discounts (
+    order_id       UUID PRIMARY KEY REFERENCES orders(order_id),
+    discount_type  VARCHAR(20) NOT NULL,
+    discount_value DECIMAL(5,2) NOT NULL,
+    promo_code     VARCHAR(20)
+);
+```
+
+**Целевой JSON (событие Kafka):**
+
+```json
+{
+  "eventId": "evt-001",
+  "eventType": "OrderCreated",
+  "eventVersion": "1.0",
+  "timestamp": "2024-11-20T10:30:00Z",
+  "payload": {
+    "orderId": "ord-123",
+    "clientId": "cl-456",
+    "product": {
+      "code": "KASKO-2024",
+      "sumInsured": 1500000.00
+    },
+    "items": [
+      {
+        "itemId": "itm-001",
+        "type": "BASE_TARIFF",
+        "value": 45000.00,
+        "description": "Базовый тариф КАСКО"
+      },
+      {
+        "itemId": "itm-002",
+        "type": "RISK_LOADING",
+        "value": 5000.00,
+        "description": "Надбавка за риск (водитель до 25 лет)"
+      }
+    ],
+    "discount": {
+      "type": "PROMO",
+      "value": 10.00,
+      "promoCode": "WELCOME10"
+    },
+    "totalPremium": 45000.00,
+    "status": "DRAFT",
+    "version": 1
+  }
+}
+```
+
+**Таблица маппинга (промежуточная):**
+
+| Поле в БД (orders) | Тип в БД | Поле в JSON | Тип в JSON | Трансформация |
+|---|---|---|---|---|
+| `order_id` | UUID | `payload.orderId` | string | Без изменений |
+| `client_id` | UUID | `payload.clientId` | string | Без изменений |
+| `product_code` | VARCHAR | `payload.product.code` | string | Без изменений |
+| `sum_insured` | DECIMAL | `payload.product.sumInsured` | number | CAST to double |
+| `status` | VARCHAR | `payload.status` | string | Без изменений |
+| `version` | INTEGER | `payload.version`
 
 ## Модуль I-4. Нефункциональные требования (НФТ)
 
@@ -1042,6 +2458,44 @@ flowchart TD
 | Availability | Процент времени, когда сервис доступен | 99.9% |
 | Error Rate | Доля ошибочных ответов | < 0.1% |
 
+---
+
+[ДОПОЛНЕНИЕ BA]
+
+## 1. Бизнес-требования и KPI
+
+### Реальный кейс: цепочка «Боль клиента → Бизнес-цель → KPI → Бизнес-требование → Функциональное требование»
+
+**Контекст:** Интернет-магазин электроники «ТехноМаркет». Клиенты массово уходят после добавления товара в корзину, не оформляя заказ. Отток на этапе корзины — 72%.
+
+| Уровень | Описание |
+|---------|----------|
+| **Боль клиента** | «Я добавил товар в корзину, но не знаю, есть ли он на складе. Жду подтверждения менеджера часами, а иногда и сутками. В итоге покупаю в другом магазине, где вижу реальный остаток онлайн». |
+| **Бизнес-цель** | Снизить отток клиентов на этапе корзины с 72% до 45% за 6 месяцев. |
+| **KPI** | • Процент брошенных корзин — снижение с 72% до 45%<br>• Время подтверждения наличия товара — с 4 часов до 30 секунд<br>• NPS (индекс лояльности) — рост с 32 до 55 |
+| **Бизнес-требование** | Система должна в реальном времени показывать клиенту актуальный остаток товара на складе при добавлении в корзину и автоматически резервировать товар на 15 минут. |
+| **Функциональное требование** | • При добавлении товара в корзину — GET-запрос к Warehouse API (timeout 500ms)<br>• Если остаток > 0 — показать зелёную метку «В наличии», зарезервировать через POST /api/v1/reserve<br>• Если остаток = 0 — показать «Нет в наличии», предложить подписку на уведомление<br>• Если Warehouse API не ответил за 500ms — показать «Уточняется у менеджера», поставить задачу в очередь |
+
+### Шаблон карточки бизнес-требования
+
+| Поле | Описание | Пример заполнения |
+|------|----------|-------------------|
+| **ID** | Уникальный идентификатор | BRQ-001 |
+| **Название** | Краткое название требования | Отображение реального остатка товара в корзине |
+| **Описание** | Что именно должна делать система | Система должна показывать клиенту актуальный остаток товара на складе в реальном времени при добавлении в корзину |
+| **Бизнес-обоснование** | Почему это важно для бизнеса | Снижение оттока на этапе корзины с 72% до 45% |
+| **Метрика успеха** | Как измерим, что требование выполнено | Время подтверждения наличия ≤ 30 сек; % брошенных корзин ≤ 45% |
+| **Стейкхолдер** | Кто отвечает за требование и кто его утверждает | Product Owner — Иванов И.И.; Бизнес-заказчик — Петрова А.С. |
+| **Приоритет** | Must Have / Should Have / Could Have / Won't Have | Must Have |
+| **Зависимости** | От каких систем/требований зависит | Warehouse API (интеграция), каталог товаров (данные) |
+| **Риски** | Что может пойти не так | Warehouse API недоступен — нужен fallback-сценарий |
+
+> 💡 **Совет BA:** всегда заполняйте поле «Метрика успеха» цифрами. Если стейкхолдер говорит «сделать удобно» — спросите: «Как мы измерим, что стало удобно? Какой конкретный показатель изменится и на сколько?» Без цифр требование — это хотелка.
+
+[КОНЕЦ ДОПОЛНЕНИЯ BA]
+
+---
+
 #### Таблица времён простоя
 
 | Availability | Допустимый downtime в год |
@@ -1050,6 +2504,79 @@ flowchart TD
 | 99.9% (три девятки) | 8.76 часа |
 | 99.99% (четыре девятки) | 52.56 минуты |
 | 99.999% (пять девяток) | 5.26 минуты |
+
+---
+
+[ДОПОЛНЕНИЕ BA]
+
+## 2. Управление приоритетами и scope
+
+### Матрица MoSCoW для гипотетического проекта
+
+**Проект:** Внедрение онлайн-калькулятора КАСКО в интернет-банке.
+
+| Категория | Описание | Примеры требований | % от объёма |
+|-----------|----------|-------------------|-------------|
+| **M**ust Have | Без этого релиз не имеет смысла. Система не работает. | • Расчёт базового тарифа по формуле<br>• Интеграция с АИС страхования<br>• Вывод итоговой премии на экран | 40% |
+| **S**hould Have | Важно, но можно отложить на следующий спринт, если не успеваем. | • Сохранение черновика расчёта<br>• Отправка расчёта на email | 25% |
+| **C**ould Have | Хорошо бы, но без этого можно жить. | • Сравнение с тарифами конкурентов<br>• Чат с консультантом на странице калькулятора | 20% |
+| **W**on't Have | Сознательно исключаем из текущего релиза. | • Интеграция с телемедициной<br>• Мобильное приложение для агентов | 15% |
+
+#### Как защищать MoSCoW перед заказчиком (скрипт переговоров)
+
+**Ситуация:** Заказчик говорит: «А давайте в первый релиз запихнём всё! И чат, и сравнение с конкурентами, и мобильное приложение для агентов».
+
+**Ваш ответ (техника «Сэндвич»):**
+
+> **Слой 1 — Согласие:** «Иван Иванович, я полностью разделяю ваше желание сделать максимально функциональный продукт. Все перечисленные фичи действительно важны для бизнеса».
+>
+> **Слой 2 — Аргументация (факты и цифры):** «Но давайте посмотрим на дату релиза. Если мы берём всё — мы выходим через 8 месяцев. Если берём только Must Have и Should Have — через 3 месяца. По нашей статистике, 80% ценности продукта дают первые 40% функционала. Остальное — это полировка. Я предлагаю: выпускаем через 3 месяца с базовым функционалом, собираем обратную связь от 1000 первых пользователей, и на основе данных дорабатываем. Это снижает риск провала на 60%».
+>
+> **Слой 3 — Предложение:** «Давайте составим две дорожные карты: Release 1 (Must + Should) за 3 месяца и Release 2 (Could + остальное) ещё через 2 месяца. Если рынок потребует — мы скорректируем приоритеты».
+
+> 💡 **Совет BA:** MoSCoW — это не просто список. Это **инструмент переговоров**. Ваша задача — перевести «хотелки» в «стоимость задержки релиза». Каждый Could Have отодвигает дату выхода на рынок. Покажите заказчику цену его хотелок в деньгах и времени.
+
+### Кейс «Остановка Gold Plating»
+
+**Контекст:** Ритейл-сеть «Продукты 24/7» (500 магазинов). Внедряем систему управления заказами поставщикам.
+
+**Ситуация:** Заказчик (директор по закупкам) требует: «Сделайте мне дашборд с прогнозом спроса на основе нейросети. Я хочу видеть, сколько бананов продастся через 2 недели с точностью 95%».
+
+**Что я сделал как BA:**
+
+1. **Задал 5 вопросов:**
+   - «Как вы сейчас прогнозируете спрос на бананы?» — «Берём среднее за прошлую неделю».
+   - «Какая текущая точность?» — «Примерно 80%».
+   - «Сколько вы теряете из-за неточности?» — «Около 2 млн руб/мес на списаниях и упущенной выручке».
+   - «Сколько стоит внедрение нейросети?» — Оценка разработки: 8 млн руб + 6 месяцев.
+   - «Какой бюджет на проект?» — 5 млн руб.
+
+2. **Посчитал ROI:**
+   - Текущие потери: 2 млн руб/мес.
+   - Улучшение с 80% до 95% точности: сокращение потерь на 30% (оценка эксперта) = 600 тыс руб/мес.
+   - Стоимость нейросети: 8 млн руб.
+   - Окупаемость: 8 / 0,6 = 13,3 месяца.
+   - Бюджет проекта: 5 млн руб — нейросеть не влезает.
+
+3. **Предложил альтернативу:**
+   - Улучшить текущий метод: добавить сезонные коэффициенты (2 недели разработки).
+   - Стоимость: 200 тыс руб.
+   - Ожидаемый эффект: повышение точности с 80% до 87% (сокращение потерь на 15% = 300 тыс руб/мес).
+   - Окупаемость: 0,67 месяца.
+   - ROI: (300 000 × 12 − 200 000) / 200 000 = 1700% годовых.
+
+**Аргументы, которые сработали:**
+- «Нейросеть окупится через 13 месяцев при бюджете 8 млн. У нас бюджет 5 млн и сроки — 3 месяца».
+- «Альтернатива окупится за 3 недели и даст 87% точности. Если этого мало — через 3 месяца внедрим нейросеть, уже имея 87% базу».
+- «Давайте не будем делать идеально — давайте сделаем работающе и дёшево, а потом улучшим».
+
+**Результат:** Заказчик согласился на альтернативу. Через 3 недели точность выросла до 87%. Через 6 месяцев внедрили нейросеть (уже на заработанные деньги).
+
+> ⚠️ **Внимание, грабли!** Gold Plating (позолота) — это когда заказчик или команда добавляют функционал, который не нужен для достижения бизнес-цели, но кажется «крутым». Ваша задача как BA — каждый раз возвращать к вопросу: **«Какая бизнес-метрика изменится от этой фичи? И сколько это стоит?»**
+
+[КОНЕЦ ДОПОЛНЕНИЯ BA]
+
+---
 
 ### Ингос-секция: Какие НФТ мы используем
 
