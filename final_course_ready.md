@@ -2497,7 +2497,7 @@ CREATE TABLE order_discounts (
 
 ## Модуль I-4. Нефункциональные требования (НФТ)
 
-См. 4_NFR_and_CAP.md
+См. [4_NFR_and_CAP.md](https://github.com/DAndreev91/course_creator/blob/main/4_NFR_and_CAP.md)
 
 ### Цели модуля
 
