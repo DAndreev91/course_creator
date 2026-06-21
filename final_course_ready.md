@@ -2699,6 +2699,8 @@ flowchart TD
 
 ## Модуль I-5. DDD, CQS/CQRS, TDD/BDD, API First
 
+См. [DDD и 4 принципа](https://github.com/DAndreev91/course_creator/blob/main/5_DDD_and_so_on.md)
+
 ### Цели модуля
 
 После изучения вы сможете:
