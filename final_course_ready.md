@@ -2952,7 +2952,7 @@ public class Policy {
 
 ## Модуль II-0. Подсчёт и планирование нагрузки
 
-См. [Планирование нагрузки для системы](https://github.com/DAndreev91/course_creator/blob/main/7Calculate_solution_metrivs_and_costs.md)
+См. [Планирование нагрузки для системы](https://github.com/DAndreev91/course_creator/blob/main/7_Calculate_solution_metrics_and_costs.md)
 
 ### Цели модуля
 
