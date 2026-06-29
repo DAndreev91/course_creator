@@ -51,6 +51,8 @@
 
 ## Модуль I-0. Принципы проектирования: SOLID, DRY, KISS, YAGNI и другие
 
+См. [Базовые принципы проектирование и разработки](https://github.com/DAndreev91/course_creator/blob/main/0_Basic_dev_principles.md) 
+
 ### Цели модуля
 
 После изучения этого модуля вы сможете:
