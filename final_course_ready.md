@@ -496,6 +496,8 @@ D < 0.5 - пакет близок к главной последовательн
 
 ## Модуль I-1. Стили архитектуры: Монолит - Модульный монолит - Микросервисы
 
+См. [Монолит или микросервисы?](https://github.com/DAndreev91/course_creator/blob/main/1_Monolith_vs_Microservices.md)
+
 ### Цели модуля
 
 После изучения вы сможете:
@@ -668,6 +670,8 @@ public class JpaOrderRepository implements OrderRepository {
 ---
 
 ## Модуль I-2. Паттерны взаимодействия: Синхрон, Асинхрон, Транзакции
+
+См. [Синхрон и асинхрон в сервисах](https://github.com/DAndreev91/course_creator/blob/main/2_Sync_vs_async_in_services.md)
 
 ### Цели модуля
 
@@ -1629,6 +1633,8 @@ public class OutboxPublisher {
 >
 
 ## Модуль I-3. Многопоточность
+
+См. [Многопоточность](https://github.com/DAndreev91/course_creator/blob/main/3_Multithreading.md)
 
 ### Цели модуля
 
