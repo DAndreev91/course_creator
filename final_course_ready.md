@@ -2808,6 +2808,8 @@ Feature: Расчёт стоимости страховки
 
 ## Модуль I-6. Управление общими данными
 
+См. [Управление общими данными](https://github.com/DAndreev91/course_creator/blob/main/6_Shared_data_management.md)
+
 ### Цели модуля
 
 После изучения вы сможете:
@@ -2949,6 +2951,8 @@ public class Policy {
 ---
 
 ## Модуль II-0. Подсчёт и планирование нагрузки
+
+См. [Планирование нагрузки для системы](https://github.com/DAndreev91/course_creator/blob/main/7Calculate_solution_metrivs_and_costs.md)
 
 ### Цели модуля
 
