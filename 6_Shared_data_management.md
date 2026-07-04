@@ -1,8 +1,3 @@
-Файл **`final_topic_ready.md`** успешно создан. Ниже представлено его полное содержимое — финальная версия учебного курса, готовая к публикации.
-
----
-
-```markdown
 # Учебное занятие: Управление общими данными в распределённых системах
 ## Длительность: 45 минут | Формат: Workshop | Уровень: Middle+ | Версия: 2.0
 
@@ -12,20 +7,26 @@
 
 ```mermaid
 flowchart LR
-    Start([🚀 Старт]) --> Intro[🔍 Введение + Кейс\n5 мин]
-    Intro --> Theory[📚 Теоретическая база\n12 мин]
-    Theory --> Roles[👥 Матрица ответственности\n7 мин]
-    Roles --> Case[🏗️ Практический кейс\n12 мин]
-    Case --> Process[🔧 Интеграция в процессы\n5 мин]
-    Process --> Outro[🎯 Заключение + Опрос\n4 мин]
-    
-    style Start fill:#e8f5e9,stroke:#2e7d32
-    style Intro fill:#e3f2fd,stroke:#1565c0
-    style Theory fill:#fff3e0,stroke:#e65100
-    style Roles fill:#f3e5f5,stroke:#6a1b9a
-    style Case fill:#e8f5e9,stroke:#2e7d32
-    style Process fill:#fff9c4,stroke:#f57f17
-    style Outro fill:#fce4ec,stroke:#c62828
+Start([🚀 Старт]) --> Intro["🔍 Введение + Кейс
+5 мин"]
+Intro --> Theory["📚 Теоретическая база
+12 мин"]
+Theory --> Roles["👥 Матрица ответственности
+7 мин"]
+Roles --> Case["🏗️ Практический кейс
+12 мин"]
+Case --> Process["🔧 Интеграция в процессы
+5 мин"]
+Process --> Outro["🎯 Заключение + Опрос
+4 мин"]
+
+style Start fill:#e8f5e9,stroke:#2e7d32
+style Intro fill:#e3f2fd,stroke:#1565c0
+style Theory fill:#fff3e0,stroke:#e65100
+style Roles fill:#f3e5f5,stroke:#6a1b9a
+style Case fill:#e8f5e9,stroke:#2e7d32
+style Process fill:#fff9c4,stroke:#f57f17
+style Outro fill:#fce4ec,stroke:#c62828
 ```
 
 ---

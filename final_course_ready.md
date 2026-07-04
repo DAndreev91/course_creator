@@ -51,6 +51,8 @@
 
 ## Модуль I-0. Принципы проектирования: SOLID, DRY, KISS, YAGNI и другие
 
+См. [Базовые принципы проектирование и разработки](https://github.com/DAndreev91/course_creator/blob/main/0_Basic_dev_principles.md) 
+
 ### Цели модуля
 
 После изучения этого модуля вы сможете:
@@ -494,6 +496,8 @@ D < 0.5 - пакет близок к главной последовательн
 
 ## Модуль I-1. Стили архитектуры: Монолит - Модульный монолит - Микросервисы
 
+См. [Монолит или микросервисы?](https://github.com/DAndreev91/course_creator/blob/main/1_Monolith_vs_Microservices.md)
+
 ### Цели модуля
 
 После изучения вы сможете:
@@ -666,6 +670,8 @@ public class JpaOrderRepository implements OrderRepository {
 ---
 
 ## Модуль I-2. Паттерны взаимодействия: Синхрон, Асинхрон, Транзакции
+
+См. [Синхрон и асинхрон в сервисах](https://github.com/DAndreev91/course_creator/blob/main/2_Sync_vs_async_in_services.md)
 
 ### Цели модуля
 
@@ -1627,6 +1633,8 @@ public class OutboxPublisher {
 >
 
 ## Модуль I-3. Многопоточность
+
+См. [Многопоточность](https://github.com/DAndreev91/course_creator/blob/main/3_Multithreading.md)
 
 ### Цели модуля
 
@@ -2808,6 +2816,8 @@ Feature: Расчёт стоимости страховки
 
 ## Модуль I-6. Управление общими данными
 
+См. [Управление общими данными](https://github.com/DAndreev91/course_creator/blob/main/6_Shared_data_management.md)
+
 ### Цели модуля
 
 После изучения вы сможете:
@@ -2949,6 +2959,8 @@ public class Policy {
 ---
 
 ## Модуль II-0. Подсчёт и планирование нагрузки
+
+См. [Планирование нагрузки для системы](https://github.com/DAndreev91/course_creator/blob/main/7_Calculate_solution_metrics_and_costs.md)
 
 ### Цели модуля
 
