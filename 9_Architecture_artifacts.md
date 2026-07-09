@@ -463,7 +463,7 @@ gantt
     axisFormat  %b %d
     
     section Sprint 1
-    Установка YARP Proxy          :active, s1_1, 2024-01-22, 5d
+    Установка YARP Proxy          :active, s1_1, 2026-06-30, 5d
     C4 L1 + L2 диаграммы          :s1_2, after s1_1, 3d
     ADR-001: выбор брокера        :s1_3, after s1_2, 2d
     
