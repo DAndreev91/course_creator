@@ -10,38 +10,17 @@
 
 ## Содержание
 
-### Часть I. Архитектура реализации
+0. [Базовые принципы разработки](0_Basic_dev_principles.md)
+1. [Монолит или Микросервисы](1_Monolith_vs_Microservices.md)
+2. [Синхронное или Асинхронное взаимодействие](2_Sync_vs_async_in_services.md)
+3. [Многопоточность](3_Multithreading.md)
+4. [NFR и CAP теоремы](4_NFR_and_CAP.md)
+5. [DDD и другие подходы](5_DDD_and_so_on.md)
+6. [Управление общими данными](6_Shared_data_management.md)
+7. [Расчет метрик и стоимости решения](7_Calculate_solution_metrics_and_costs.md)
+8. [Зачем нужен DevOps и что такое k8s](8_Why_devops_needed_and_what_is_k8s.md)
+9. [Артефакты архитектуры](9_Architecture_artifacts.md)
 
-| N | Модуль | Время |
-|---|--------|-------|
-| 0 | Принципы проектирования: SOLID, DRY, KISS, YAGNI, CRP, REP, LoD, ADP, SDP, SoC | 20 мин |
-| 1 | Стили архитектуры: Монолит - Модульный монолит - Микросервисы. Layered vs Hexagonal | 20 мин |
-| 2 | Паттерны взаимодействия: синхрон, асинхрон, транзакции, Saga, Outbox | 20 мин |
-| 3 | Многопоточность: race condition, deadlock, примитивы синхронизации | 15 мин |
-| 4 | Нефункциональные требования: CAP, метрики, проработка с заказчиком | 15 мин |
-| 5 | DDD, CQS/CQRS, TDD/BDD, API First | 20 мин |
-| 6 | Управление общими данными: SSOT, идемпотентность, версионирование | 15 мин |
-
-### Часть II. Архитектура решений
-
-| N | Модуль | Время |
-|---|--------|-------|
-| 0 | Подсчёт и планирование нагрузки, capacity planning | 10 мин |
-| 1 | Трейдоффы: треугольник "Быстро - Дёшево - Надёжно" | 10 мин |
-| 2 | НФТ с точки зрения архитектуры приложения: Circuit Breaker, SLA | 15 мин |
-| 3 | Стратегии интеграции: синхрон, асинхрон, файлы | 10 мин |
-| 4 | Bounded Context и C4-диаграммы (Level 1-4) | 15 мин |
-| 5 | Эволюция: Strangler Fig, архитектурные метрики, миграция | 15 мин |
-| 6 | ADR: шаблон Michael Nygard, Risks, NFR, Evolution Plan | 15 мин |
-
-### Дополнительно
-
-| Раздел | Описание |
-|--------|----------|
-| Итоговая аттестация | Проект: ADR + C4 + трейдофф-анализ + расчёт нагрузки |
-| Глоссарий | Все аббревиатуры и термины курса |
-| Рекомендуемая литература | 8 ключевых источников |
-| Инструменты | Structurizr, adr-tools, jdeps, ArchUnit и др. |
 
 ---
 
@@ -2954,11 +2933,7 @@ public class Policy {
 
 ---
 
-# Часть II. Архитектура решений
-
----
-
-## Модуль II-0. Подсчёт и планирование нагрузки
+## Модуль I-1. Подсчёт и планирование нагрузки
 
 См. [Планирование нагрузки для системы](https://github.com/DAndreev91/course_creator/blob/main/7_Calculate_solution_metrics_and_costs.md)
 
@@ -3017,236 +2992,13 @@ CPU_cores = 500 * 0.1 / 0.85 = 58.8 ~ 64 cores (с округлением и buf
 
 ---
 
-## Модуль II-1. Трейдоффы: Быстро - Дёшево - Надёжно
+## Модуль I-8. Зачем нужны девопсы и чем живут контейнеры
 
-### Цели модуля
+См. [Зачем нужен DevOps и что такое k8s](8_Why_devops_needed_and_what_is_k8s.md)
 
-После изучения вы сможете:
-- Анализировать трейдоффы архитектурных решений
-- Применять треугольник компромиссов
-- Документировать принятые компромиссы
+## Модуль I-9. Bounded Context и C4-диаграммы
 
-### Теоретическая часть
-
-#### Треугольник компромиссов
-
-```mermaid
-flowchart TD
-    A[Треугольник компромиссов] --> B[Быстро]
-    A --> C[Дёшево]
-    A --> D[Надёжно]
-    
-    B & D --> E[Дорого]
-    B & C --> F[Ненадёжно]
-    C & D --> G[Медленно]
-    
-    E --> H[Быстро + Надёжно = Дорого]
-    F --> I[Быстро + Дёшево = Ненадёжно]
-    G --> J[Дёшево + Надёжно = Медленно]
-```
-
-#### Примеры трейдоффов
-
-| Решение | Что получаем | Чем жертвуем |
-|---------|-------------|--------------|
-| Использовать managed БД (RDS) | Надёжность, быстрота запуска | Деньги |
-| Написать свою библиотеку | Контроль | Время разработки |
-| Eventual consistency | Производительность | Консистентность |
-| Монолит | Простота | Масштабируемость |
-
-### Ингос-секция: Ключевые трейдоффы
-
-- Выбрали Kafka вместо RabbitMQ: Надёжность + масштабирование -> сложность
-- Оставили монолит для core: Скорость разработки -> сложность масштабирования
-- SSOT через API: Консистентность -> задержка
-
-### Практика
-
-Опишите трейдофф: "Замена монолитного сервиса расчётов на микросервис с REST API и кэшем Redis".
-
-<details>
-<summary>Ожидаемый ответ</summary>
-
-| Что получаем | Чем жертвуем |
-|-------------|--------------|
-| Масштабирование расчётов независимо | Сетевая задержка (REST) |
-| Изоляция сбоев | Сложность (Circuit Breaker, retry) |
-| Быстрый кэш (Redis) | Конечная консистентность кэша |
-| Возможность переиспользовать сервис | Дополнительная инфраструктура |
-
-</details>
-
-### Контрольные вопросы
-
-1. Можно ли получить все три вершины треугольника одновременно?
-2. Как документировать трейдоффы в проекте?
-3. Какой трейдофф выбрать для MVP? Для enterprise-продукта?
-
----
-
-## Модуль II-2. НФТ с точки зрения архитектуры приложения
-
-### Цели модуля
-
-После изучения вы сможете:
-- Проектировать Circuit Breaker для отказоустойчивости
-- Определять SLA/SLO/SLI для сервиса
-
-### Теоретическая часть
-
-#### Circuit Breaker State Machine
-
-```mermaid
-stateDiagram-v2
-    [*] --> CLOSED : Инициализация
-    CLOSED --> OPEN : Превышение порога ошибок
-    OPEN --> HALF_OPEN : Таймаут истек
-    HALF_OPEN --> CLOSED : Пробный запрос успешен
-    HALF_OPEN --> OPEN : Пробный запрос неудачен
-```
-
-### Пример: Circuit Breaker с Resilience4j
-
-```java
-// pom.xml
-<dependency>
-    <groupId>io.github.resilience4j</groupId>
-    <artifactId>resilience4j-spring-boot3</artifactId>
-</dependency>
-
-// application.yml
-resilience4j.circuitbreaker:
-  configs:
-    default:
-      slidingWindowSize: 10
-      minimumNumberOfCalls: 5
-      failureRateThreshold: 50
-      waitDurationInOpenState: 10s
-      permittedNumberOfCallsInHalfOpenState: 3
-
-// Service
-@Service
-public class PaymentService {
-    @CircuitBreaker(name = "paymentService", fallbackMethod = "fallback")
-    public PaymentResult processPayment(PaymentRequest request) {
-        return restTemplate.postForObject(paymentApiUrl, request, PaymentResult.class);
-    }
-    
-    public PaymentResult fallback(PaymentRequest request, Throwable t) {
-        log.warn("Payment service unavailable, returning default", t);
-        return PaymentResult.retryLater(request.getOrderId());
-    }
-}
-```
-
-### Распределённый трейсинг (OpenTelemetry)
-
-```java
-// Добавление трейсинга в проект
-// 1. Добавить зависимость opentelemetry-javaagent
-// 2. Настроить экспорт в Jaeger/Zipkin
-
-@Slf4j
-@Service
-public class PolicyService {
-    public Policy createPolicy(CreatePolicyRequest request) {
-        log.info("Creating policy for request: {}", request);
-        // ... логика
-    }
-}
-```
-
-### Ингос-секция: Отказоустойчивость
-
-- Circuit Breaker: Для всех внешних вызовов
-- Retry: Для временных ошибок (до 3 попыток)
-- Fallback: Возврат кэшированных данных при недоступности сервиса
-- Трейсинг: Внедряем OpenTelemetry
-
-### Практика
-
-Настройте Circuit Breaker для сервиса с параметрами: 10 запросов в окне, порог ошибок 40%, время восстановления 30 секунд, 2 пробных запроса.
-
-### Контрольные вопросы
-
-1. Какие состояния есть у Circuit Breaker?
-2. Как выбрать порог ошибок для Circuit Breaker?
-3. Чем SLI отличается от SLO?
-
----
-
-## Модуль II-3. Стратегии интеграции
-
-### Цели модуля
-
-После изучения вы сможете:
-- Выбирать между синхронной, асинхронной и файловой интеграцией
-- Понимать, когда использовать брокеры сообщений
-
-### Теоретическая часть
-
-#### Decision Tree выбора стратегии интеграции
-
-```mermaid
-flowchart TD
-    A[Старт] --> B{Нужен немедленный ответ?}
-    B -->|Да| C[Синхронная интеграция]
-    B -->|Нет| D{Объём данных > 10MB?}
-    D -->|Да| E[Интеграция через файлы]
-    D -->|Нет| F{Скорость важнее консистентности?}
-    F -->|Да| G[Асинхронная интеграция]
-    F -->|Нет| C
-```
-
-### Пример: Kafka producer/consumer
-
-```java
-// Producer
-@Service
-public class PolicyEventProducer {
-    private final KafkaTemplate<String, PolicyEvent> kafka;
-    
-    public void policyCreated(Policy policy) {
-        kafka.send("policy-events", new PolicyEvent(policy.getId(), "CREATED", policy));
-    }
-}
-
-// Consumer
-@Component
-public class PolicyEventListener {
-    @KafkaListener(topics = "policy-events", groupId = "notification-group")
-    public void handlePolicyCreated(PolicyEvent event) {
-        if ("CREATED".equals(event.getType())) {
-            notificationService.send(event.getPolicy().getOwnerEmail(), 
-                "Your policy has been created!");
-        }
-    }
-}
-
-// application.yml
-spring.kafka:
-  consumer:
-    group-id: payment-service
-    auto-offset-reset: earliest
-  producer:
-    retries: 3
-```
-
-### Ингос-секция: Интеграции
-
-- REST: Операции, требующие немедленного ответа (расчёт стоимости)
-- Kafka: Долгие процессы (оформление полиса через Saga)
-- Файлы: Выгрузка отчётов для внешних систем
-
-### Контрольные вопросы
-
-1. Когда синхронная интеграция опасна?
-2. В каких случаях файловая интеграция - лучший выбор?
-3. Как обработать poison pill в Kafka?
-
----
-
-## Модуль II-4. Bounded Context и C4-диаграммы
+См. [Артефакты архитектуры](9_Architecture_artifacts.md)
 
 ### Цели модуля
 
@@ -3331,16 +3083,6 @@ workspace {
 2. Какие отношения Bounded Context вы знаете?
 3. Чем Structurizr отличается от ручного рисования диаграмм?
 
----
-
-## Модуль II-5. Эволюция архитектуры
-
-### Цели модуля
-
-После изучения вы сможете:
-- Применять Strangler Fig для миграции с монолита
-- Анализировать архитектуру с помощью метрик
-
 ### Теоретическая часть
 
 #### Strangler Fig Pattern
@@ -3417,17 +3159,6 @@ flowchart TD
 1. Почему Big Bang - плохая стратегия миграции?
 2. В чём опасность Distributed Monolith?
 3. Как метрика Distance помогает во время миграции?
-
----
-
-## Модуль II-6. ADR - Architecture Decision Records
-
-### Цели модуля
-
-После изучения вы сможете:
-- Писать ADR по шаблону Michael Nygard
-- Документировать риски и НФТ
-- Проходить процесс ArchCom
 
 ### Теоретическая часть
 
